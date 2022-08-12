@@ -37,6 +37,16 @@ python3 scripts/run.py --mode nerf --scene data/nerf/fox --load_snapshot data/ne
 * base.msgpackは, train結果のsnapshot. InstantNeRFのGUIから保存できる.
 * base_cam.jsonは, 指定したカメラワークのキーフレーム. InstantNeRFのGUIから保存できる.(撮影した画像位置を中心にずらすと良い)
 
+# NeRFの結果をmeshで書き出す
+
+```bash
+python3 scripts/run.py --scene data/nerf/fox --load_snapshot data/nerf/fox/base.msgpack --save_mesh fox.obj
+```
+
+* obj or plyで書き出せるが、テクスチャは書き出せず.またmeshも荒い.
+* 現時点ではリトポ用の域を出ない.将来に期待.
+
+
 # Cmake 3.22.6以下でのコンフィグが必須
 
 ```bash
