@@ -54,11 +54,12 @@ snap remove cmake
 snap info cmake
 sudo snap install cmake --channel=3.22/stable --classic
 export CUDACXX=/usr/local/cuda-11.6/bin/nvcc
-cmake . -B build
+/snap/bin/cmake . -B build
 ```
 
 * sudo snap install cmake --channel=3.22/stable --classic でcmakeのバージョン指定
 * export CUDACXX=/usr/local/cuda-11.6/bin/nvccで,cuda指定
+* snapでinstallしたcmakeは、/snap/bin/cmakeで呼べる
 
 # COLOMAP3.3のインストール
 
@@ -107,3 +108,13 @@ sudo apt update
 sudo apt install vulkan-sdk
 ```
 
+# instant-ngpの最新を取り込む場合
+
+```bash
+git fetch
+git pull
+# https://github.com/NVlabs/instant-ngp/issues/415
+git submodule sync --recursive
+git submodule update --recursive
+```
+* git submoduleを忘れずに行う
