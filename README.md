@@ -10,9 +10,11 @@ In each case, we train and render a MLP with multiresolution hash input encoding
 > __Instant Neural Graphics Primitives with a Multiresolution Hash Encoding__  
 > [Thomas Müller](https://tom94.net), [Alex Evans](https://research.nvidia.com/person/alex-evans), [Christoph Schied](https://research.nvidia.com/person/christoph-schied), [Alexander Keller](https://research.nvidia.com/person/alex-keller)  
 > _ACM Transactions on Graphics (__SIGGRAPH__), July 2022_  
-> __[Project page](https://nvlabs.github.io/instant-ngp)&nbsp;/ [Paper](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf)&nbsp;/ [Video](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.mp4)&nbsp;/ [BibTeX](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.bib)__
+> __[Project page](https://nvlabs.github.io/instant-ngp)&nbsp;/ [Paper](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf)&nbsp;/ [Video](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.mp4)&nbsp;/ [Presentation](https://tom94.net/data/publications/mueller22instant/mueller22instant-gtc.mp4)&nbsp;/ [BibTeX](https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.bib)__
 
-For business inquiries, please visit our website and submit the form: [NVIDIA Research Licensing](https://www.nvidia.com/en-us/research/inquiries/)
+To get started with NVIDIA Instant NeRF, check out the [blog post](https://developer.nvidia.com/blog/getting-started-with-nvidia-instant-nerfs/) and [SIGGRAPH tutorial](https://www.nvidia.com/en-us/on-demand/session/siggraph2022-sigg22-s-16/)
+
+For business inquiries, please submit the [NVIDIA research licensing form](https://www.nvidia.com/en-us/research/inquiries/).
 
 
 ## Requirements
@@ -70,11 +72,11 @@ If the build fails, please consult [this list of possible fixes](https://github.
 
 If the build succeeds, you can now run the code via the `build/testbed` executable or the `scripts/run.py` script described below.
 
-If automatic GPU architecture detection fails, (as can happen if you have multiple GPUs installed), set the `TCNN_CUDA_ARCHITECTURES` enivonment variable for the GPU you would like to use. The following table lists the values for common GPUs. If your GPU is not listed, consult [this exhaustive list](https://developer.nvidia.com/cuda-gpus).
+If automatic GPU architecture detection fails, (as can happen if you have multiple GPUs installed), set the `TCNN_CUDA_ARCHITECTURES` environment variable for the GPU you would like to use. The following table lists the values for common GPUs. If your GPU is not listed, consult [this exhaustive list](https://developer.nvidia.com/cuda-gpus).
 
-| RTX 30X0 | A100 | RTX 20X0 | TITAN V / V100 | GTX 10X0 / TITAN Xp | GTX 9X0 | K80 |
-|:--------:|:----:|:--------:|:--------------:|:-------------------:|:-------:|:---:|
-|       86 |   80 |       75 |             70 |                  61 |      52 |  37 |
+| H100 | 40X0 | 30X0 | A100 | 20X0 | TITAN V / V100 | 10X0 / TITAN Xp | 9X0 | K80 |
+|:----:|:----:|:----:|:----:|:----:|:--------------:|:---------------:|:---:|:---:|
+|   90 |   89 |   86 |   80 |   75 |             70 |              61 |  52 |  37 |
 
 
 
@@ -115,7 +117,7 @@ Now you can run:
 instant-ngp$ ./build/testbed --scene data/nerf_synthetic/lego/transforms_train.json
 ```
 
-**[To prepare your own dataset for use with our NeRF implementation, click here.](docs/nerf_dataset_tips.md)**
+**[To prepare your own dataset for use with our NeRF implementation, click here.](docs/nerf_dataset_tips.md)** See also [this video](https://www.youtube.com/watch?v=8GbENSmdVeE) for a guided walkthrough.
 
 ### SDF armadillo
 
@@ -186,7 +188,7 @@ The "Camera path" GUI lets you set frames along a path. "Add from cam" is the ma
 To conduct controlled experiments in an automated fashion, all features from the interactive testbed (and more!) have Python bindings that can be easily instrumented.
 For an example of how the `./build/testbed` application can be implemented and extended from within Python, see `./scripts/run.py`, which supports a superset of the command line arguments that `./build/testbed` does.
 
-Here is a typical command line using `scripts/run.py` to generate a 5-second flythrough of the fox dataset to the (default) file `movie.mp4`, after using the testbed to save a (default) NeRF snapshot `base.msgpack` and a set of camera key frames:
+Here is a typical command line using `scripts/run.py` to generate a 5-second flythrough of the fox dataset to the (default) file `video.mp4`, after using the testbed to save a (default) NeRF snapshot `base.msgpack` and a set of camera key frames: (see [this video](https://www.youtube.com/watch?v=8GbENSmdVeE) for a guided walkthrough)
 
 ```sh
 instant-ngp$ python scripts/run.py --mode nerf --scene data/nerf/fox --load_snapshot data/nerf/fox/base.msgpack --video_camera_path data/nerf/fox/base_cam.json --video_n_seconds 5 --video_fps 60 --width 1920 --height 1080
@@ -206,7 +208,7 @@ __A:__ Use `./build/testbed --no-gui` or `python scripts/run.py`. You can also c
 ##
 __Q:__ Does this codebase run on [Google Colab](https://colab.research.google.com/)?
 
-__A:__ Yes. See [this example](https://colab.research.google.com/drive/10TgQ4gyVejlHiinrmm5XOvQQmgVziK3i?usp=sharing) by user [@myagues](https://github.com/NVlabs/instant-ngp/issues/6#issuecomment-1016397579). Caveat: this codebase requires large amounts of GPU RAM and might not fit on your assigned GPU. It will also run slower on older GPUs.
+__A:__ Yes. See [this example](./notebooks/instant_ngp.ipynb) inspired on the notebook created by user [@myagues](https://github.com/NVlabs/instant-ngp/issues/6#issuecomment-1016397579). Caveat: this codebase requires large amounts of GPU RAM and might not fit on your assigned GPU. It will also run slower on older GPUs.
 
 ##
 __Q:__ Is there a [Docker container](https://www.docker.com/)?
@@ -285,7 +287,7 @@ If your problem persists, consult the following table of known issues.
 | __Compile error:__ too few arguments in function call | Update submodules with the above two `git` commands. ([#37](https://github.com/NVlabs/instant-ngp/issues/37) [#52](https://github.com/NVlabs/instant-ngp/issues/52)) |
 | __Python error:__ No module named 'pyngp' | It is likely that CMake did not detect your Python installation and therefore did not build `pyngp`. Check CMake logs to verify this. If `pyngp` was built in a different folder than `instant-ngp/build`, Python will be unable to detect it and you have to supply the full path to the import statement. ([#43](https://github.com/NVlabs/instant-ngp/issues/43)) |
 
-If you cannot find your problem in the table, please feel free to [open an issue](https://github.com/NVlabs/instant-ngp/issues/new) and ask for help.
+If you cannot find your problem in the table, try searching [the discussions board](https://github.com/NVlabs/instant-ngp/discussions) and [the issues area](https://github.com/NVlabs/instant-ngp/issues?q=is%3Aissue) for help. If you are still stuck, please [open an issue](https://github.com/NVlabs/instant-ngp/issues/new) and ask for help.
 
 ## Thanks
 

@@ -272,8 +272,8 @@ void Testbed::set_camera_to_training_view(int trainview) {
 	m_camera = m_smoothed_camera = get_xform_given_rolling_shutter(m_nerf.training.transforms[trainview], m_nerf.training.dataset.metadata[trainview].rolling_shutter, Vector2f{0.5f, 0.5f}, 0.0f);
 	m_relative_focal_length = m_nerf.training.dataset.metadata[trainview].focal_length / (float)m_nerf.training.dataset.metadata[trainview].resolution[m_fov_axis];
 	m_scale = std::max((old_look_at - view_pos()).dot(view_dir()), 0.1f);
-	m_nerf.render_with_camera_distortion = true;
-	m_nerf.render_distortion = m_nerf.training.dataset.metadata[trainview].camera_distortion;
+	m_nerf.render_with_lens_distortion = true;
+	m_nerf.render_lens = m_nerf.training.dataset.metadata[trainview].lens;
 	m_screen_center = Vector2f::Constant(1.0f) - m_nerf.training.dataset.metadata[0].principal_point;
 }
 
@@ -352,7 +352,8 @@ inline float linear_to_db(float x) {
 	return -10.f*logf(x)/logf(10.f);
 }
 
-void Testbed::dump_parameters_as_images() {
+template <typename T>
+void Testbed::dump_parameters_as_images(const T* params, const std::string& filename_base) {
 	size_t non_layer_params_width = 2048;
 
 	size_t layer_params = 0;
@@ -360,22 +361,89 @@ void Testbed::dump_parameters_as_images() {
 		layer_params += size.first * size.second;
 	}
 
-	size_t non_layer_params = m_network->n_params() - layer_params;
+	size_t n_params = m_network->n_params();
+	size_t n_non_layer_params = n_params - layer_params;
 
-	float* params = m_trainer->params();
-	std::vector<float> params_cpu(layer_params + next_multiple(non_layer_params, non_layer_params_width), 0.0f);
-	CUDA_CHECK_THROW(cudaMemcpy(params_cpu.data(), params, m_network->n_params() * sizeof(float), cudaMemcpyDeviceToHost));
+	std::vector<T> params_cpu_network_precision(layer_params + next_multiple(n_non_layer_params, non_layer_params_width));
+	std::vector<float> params_cpu(params_cpu_network_precision.size(), 0.0f);
+	CUDA_CHECK_THROW(cudaMemcpy(params_cpu_network_precision.data(), params, n_params * sizeof(T), cudaMemcpyDeviceToHost));
+
+	for (size_t i = 0; i < n_params; ++i) {
+		params_cpu[i] = (float)params_cpu_network_precision[i];
+	}
 
 	size_t offset = 0;
 	size_t layer_id = 0;
 	for (auto size : m_network->layer_sizes()) {
-		save_exr(params_cpu.data() + offset, size.second, size.first, 1, 1, fmt::format("layer-{}.exr", layer_id).c_str());
+		save_exr(params_cpu.data() + offset, size.second, size.first, 1, 1, fmt::format("{}-layer-{}.exr", filename_base, layer_id).c_str());
 		offset += size.first * size.second;
 		++layer_id;
 	}
 
-	std::string filename = "non-layer.exr";
-	save_exr(params_cpu.data() + offset, non_layer_params_width, non_layer_params / non_layer_params_width, 1, 1, filename.c_str());
+	if (n_non_layer_params > 0) {
+		std::string filename = fmt::format("{}-non-layer.exr", filename_base);
+		save_exr(params_cpu.data() + offset, non_layer_params_width, n_non_layer_params / non_layer_params_width, 1, 1, filename.c_str());
+	}
+}
+
+template void Testbed::dump_parameters_as_images<__half>(const __half*, const std::string&);
+template void Testbed::dump_parameters_as_images<float>(const float*, const std::string&);
+
+Eigen::Matrix<float, 3, 4> Testbed::crop_box(bool nerf_space) const {
+	Eigen::Vector3f cen = m_render_aabb_to_local.transpose() * m_render_aabb.center();
+	Eigen::Vector3f radius = m_render_aabb.diag() * 0.5f;
+	Eigen::Vector3f x = m_render_aabb_to_local.row(0) * radius.x();
+	Eigen::Vector3f y = m_render_aabb_to_local.row(1) * radius.y();
+	Eigen::Vector3f z = m_render_aabb_to_local.row(2) * radius.z();
+	Eigen::Matrix<float, 3, 4> rv;
+	rv.col(0) = x;
+	rv.col(1) = y;
+	rv.col(2) = z;
+	rv.col(3) = cen;
+	if (nerf_space) {
+		rv = m_nerf.training.dataset.ngp_matrix_to_nerf(rv, true);
+	}
+	return rv;
+}
+
+void Testbed::set_crop_box(Eigen::Matrix<float, 3, 4> m, bool nerf_space) {
+	if (nerf_space) {
+		m = m_nerf.training.dataset.nerf_matrix_to_ngp(m, true);
+	}
+	Eigen::Vector3f radius(m.col(0).norm(), m.col(1).norm(), m.col(2).norm());
+	Eigen::Vector3f cen(m.col(3));
+	m_render_aabb_to_local.row(0) = m.col(0) / radius.x();
+	m_render_aabb_to_local.row(1) = m.col(1) / radius.y();
+	m_render_aabb_to_local.row(2) = m.col(2) / radius.z();
+	cen = m_render_aabb_to_local * cen;
+	m_render_aabb.min = cen - radius;
+	m_render_aabb.max = cen + radius;
+}
+
+std::vector<Eigen::Vector3f> Testbed::crop_box_corners(bool nerf_space) const {
+	Eigen::Matrix<float, 3, 4> m = crop_box(nerf_space);
+	std::vector<Eigen::Vector3f> rv(8);
+	for (int i = 0; i < 8; ++i) {
+		rv[i] = m * Eigen::Vector4f((i & 1) ? 1.f : -1.f, (i & 2) ? 1.f : -1.f, (i & 4) ? 1.f : -1.f, 1.f);
+		/* debug print out corners to check math is all lined up */
+		if (0) {
+			tlog::info() << rv[i].x() << "," << rv[i].y() << "," << rv[i].z() << " [" << i << "]";
+			Eigen::Vector3f mn = m_render_aabb.min;
+			Eigen::Vector3f mx = m_render_aabb.max;
+			Eigen::Matrix3f m = m_render_aabb_to_local.transpose();
+			Eigen::Vector3f a;
+
+			a.x() = (i&1) ? mx.x() : mn.x();
+			a.y() = (i&2) ? mx.y() : mn.y();
+			a.z() = (i&4) ? mx.z() : mn.z();
+			a = m * a;
+			if (nerf_space) {
+				a = m_nerf.training.dataset.ngp_position_to_nerf(a);
+			}
+			tlog::info() << a.x() << "," << a.y() << "," << a.z() << " [" << i << "]";
+		}
+	}
+	return rv;
 }
 
 #ifdef NGP_GUI
@@ -396,17 +464,16 @@ void Testbed::imgui() {
 			snprintf(path_filename_buf, sizeof(path_filename_buf), "%s", get_filename_in_data_path_with_suffix(m_data_path, m_network_config_path, "_cam.json").c_str());
 		}
 
-		if (m_camera_path.imgui(path_filename_buf, m_render_ms.val(), m_camera, m_slice_plane_z, m_scale, fov(), m_aperture_size, m_bounding_radius, !m_nerf.training.dataset.xforms.empty() ? m_nerf.training.dataset.xforms[0].start : Matrix<float, 3, 4>::Identity())) {
+		if (m_camera_path.imgui(path_filename_buf, m_render_ms.val(), m_camera, m_slice_plane_z, m_scale, fov(), m_aperture_size, m_bounding_radius, !m_nerf.training.dataset.xforms.empty() ? m_nerf.training.dataset.xforms[0].start : Matrix<float, 3, 4>::Identity(), m_nerf.glow_mode, m_nerf.glow_y_cutoff)) {
 			if (m_camera_path.m_update_cam_from_path) {
 				set_camera_from_time(m_camera_path.m_playtime);
 				if (read > 1) {
 					m_smoothed_camera = m_camera;
 				}
-
-				reset_accumulation(true);
-			} else {
-				m_pip_render_surface->reset_accumulation();
 			}
+
+			m_pip_render_surface->reset_accumulation();
+			reset_accumulation(true);
 		}
 		if (!m_camera_path.m_keyframes.empty()) {
 			float w = ImGui::GetContentRegionAvail().x;
@@ -582,6 +649,9 @@ void Testbed::imgui() {
 		}
 
 		ImGui::Checkbox("Dynamic resolution", &m_dynamic_res);
+		if (ImGui::Checkbox("VSync", &m_vsync)) {
+			glfwSwapInterval(m_vsync ? 1 : 0);
+		}
 		ImGui::SliderFloat("Target FPS", &m_dynamic_res_target_fps, 2.0f, 144.0f, "%.01f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat);
 		ImGui::SliderInt("Max spp", &m_max_spp, 0, 1024, "%d", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat);
 
@@ -616,6 +686,10 @@ void Testbed::imgui() {
 			accum_reset |= ImGui::SliderInt("training image latent code for inference", (int*)&m_nerf.extra_dim_idx_for_inference, 0, m_nerf.training.dataset.n_images-1);
 		}
 		accum_reset |= ImGui::Combo("Render mode", (int*)&m_render_mode, RenderModeStr);
+		if (m_testbed_mode == ETestbedMode::Nerf)  {
+			accum_reset |= ImGui::Combo("Groundtruth Render mode", (int*)&m_ground_truth_render_mode, GroundTruthRenderModeStr);
+			accum_reset |= ImGui::SliderFloat("Groundtruth Alpha", &m_ground_truth_alpha, 0.0f, 1.0f, "%.02f", ImGuiSliderFlags_AlwaysClamp);
+		}
 		accum_reset |= ImGui::Combo("Color space", (int*)&m_color_space, ColorSpaceStr);
 		accum_reset |= ImGui::Combo("Tonemap curve", (int*)&m_tonemap_curve, TonemapCurveStr);
 		accum_reset |= ImGui::ColorEdit4("Background", &m_background_color[0]);
@@ -687,26 +761,27 @@ void Testbed::imgui() {
 		}
 
 		if (m_testbed_mode == ETestbedMode::Nerf && ImGui::TreeNode("NeRF rendering options")) {
-			accum_reset |= ImGui::Checkbox("Apply lens distortion", &m_nerf.render_with_camera_distortion);
+			accum_reset |= ImGui::Checkbox("Apply lens distortion", &m_nerf.render_with_lens_distortion);
 
-			if (m_nerf.render_with_camera_distortion) {
-				accum_reset |= ImGui::Combo("Distortion mode", (int*)&m_nerf.render_distortion.mode, "None\0Iterative\0F-Theta\0LatLong\0");
-				if (m_nerf.render_distortion.mode == ECameraDistortionMode::Iterative) {
-					accum_reset |= ImGui::InputFloat("k1", &m_nerf.render_distortion.params[0], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("k2", &m_nerf.render_distortion.params[1], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("p1", &m_nerf.render_distortion.params[2], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("p2", &m_nerf.render_distortion.params[3], 0.f, 0.f, "%.5f");
-				}
-				else if (m_nerf.render_distortion.mode == ECameraDistortionMode::FTheta) {
-					accum_reset |= ImGui::InputFloat("width", &m_nerf.render_distortion.params[5], 0.f, 0.f, "%.0f");
-					accum_reset |= ImGui::InputFloat("height", &m_nerf.render_distortion.params[6], 0.f, 0.f, "%.0f");
-					accum_reset |= ImGui::InputFloat("f_theta p0", &m_nerf.render_distortion.params[0], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("f_theta p1", &m_nerf.render_distortion.params[1], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("f_theta p2", &m_nerf.render_distortion.params[2], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("f_theta p3", &m_nerf.render_distortion.params[3], 0.f, 0.f, "%.5f");
-					accum_reset |= ImGui::InputFloat("f_theta p4", &m_nerf.render_distortion.params[4], 0.f, 0.f, "%.5f");
+			if (m_nerf.render_with_lens_distortion) {
+				accum_reset |= ImGui::Combo("Lens mode", (int*)&m_nerf.render_lens.mode, "Perspective\0OpenCV\0F-Theta\0LatLong\0");
+				if (m_nerf.render_lens.mode == ELensMode::OpenCV) {
+					accum_reset |= ImGui::InputFloat("k1", &m_nerf.render_lens.params[0], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("k2", &m_nerf.render_lens.params[1], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("p1", &m_nerf.render_lens.params[2], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("p2", &m_nerf.render_lens.params[3], 0.f, 0.f, "%.5f");
+				} else if (m_nerf.render_lens.mode == ELensMode::FTheta) {
+					accum_reset |= ImGui::InputFloat("width", &m_nerf.render_lens.params[5], 0.f, 0.f, "%.0f");
+					accum_reset |= ImGui::InputFloat("height", &m_nerf.render_lens.params[6], 0.f, 0.f, "%.0f");
+					accum_reset |= ImGui::InputFloat("f_theta p0", &m_nerf.render_lens.params[0], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("f_theta p1", &m_nerf.render_lens.params[1], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("f_theta p2", &m_nerf.render_lens.params[2], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("f_theta p3", &m_nerf.render_lens.params[3], 0.f, 0.f, "%.5f");
+					accum_reset |= ImGui::InputFloat("f_theta p4", &m_nerf.render_lens.params[4], 0.f, 0.f, "%.5f");
 				}
 			}
+
+			accum_reset |= ImGui::SliderFloat("Min transmittance", &m_nerf.render_min_transmittance, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat);
 			ImGui::TreePop();
 		}
 
@@ -769,9 +844,7 @@ void Testbed::imgui() {
 				set_visualized_layer(m_visualized_layer);
 			}
 			if (ImGui::Checkbox("Single view", &m_single_view)) {
-				if (!m_single_view) {
-					set_visualized_dim(-1);
-				}
+				set_visualized_dim(-1);
 				accum_reset = true;
 			}
 
@@ -848,6 +921,7 @@ void Testbed::imgui() {
 			accum_reset |= ImGui::SliderFloat2("Screen center", &m_screen_center.x(), 0.f, 1.f);
 			accum_reset |= ImGui::SliderFloat2("Parallax shift", &m_parallax_shift.x(), -1.f, 1.f);
 			accum_reset |= ImGui::SliderFloat("Slice / focus depth", &m_slice_plane_z, -m_bounding_radius, m_bounding_radius);
+			accum_reset |= ImGui::SliderFloat("Render near distance", &m_render_near_distance, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoRoundToFormat);
 			char buf[2048];
 			Vector3f v = view_dir();
 			Vector3f p = look_at();
@@ -934,7 +1008,7 @@ void Testbed::imgui() {
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Dump parameters as images")) {
-			dump_parameters_as_images();
+			dump_parameters_as_images(m_trainer->params(), "params");
 		}
 		if (ImGui::BeginPopupModal("Snapshot load error", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("%s", snapshot_load_error_string.c_str());
@@ -962,7 +1036,7 @@ void Testbed::imgui() {
 
 			if (imgui_colored_button("Mesh it!", 0.4f)) {
 				marching_cubes(res3d, aabb, m_render_aabb_to_local, m_mesh.thresh);
-				m_nerf.render_with_camera_distortion = false;
+				m_nerf.render_with_lens_distortion = false;
 			}
 			if (m_mesh.indices.size()>0) {
 				ImGui::SameLine();
@@ -983,7 +1057,10 @@ void Testbed::imgui() {
 				ImGui::SameLine();
 				if (imgui_colored_button("Save RGBA PNG sequence", 0.2f)) {
 					auto effective_view_dir = flip_y_and_z_axes ? Vector3f{0.0f, 1.0f, 0.0f} : Vector3f{0.0f, 0.0f, 1.0f};
-					GPUMemory<Array4f> rgba = get_rgba_on_grid(res3d, effective_view_dir, true, true);
+					// Depth of 0.01f is arbitrarily chosen to produce a visually interpretable range of alpha values.
+					// Alternatively, if the true transparency of a given voxel is desired, one could use the voxel size,
+					// the voxel diagonal, or some form of expected ray length through the voxel, given random directions.
+					GPUMemory<Array4f> rgba = get_rgba_on_grid(res3d, effective_view_dir, true, 0.01f);
 					auto dir = m_data_path / "rgba_slices";
 					if (!dir.exists()) {
 						fs::create_directory(dir);
@@ -1002,7 +1079,8 @@ void Testbed::imgui() {
 					for (int cascade = 0; (1<<cascade)<= m_aabb.diag().x()+0.5f; ++cascade) {
 						float radius = (1<<cascade) * 0.5f;
 						m_render_aabb = BoundingBox(Eigen::Vector3f::Constant(0.5f-radius), Eigen::Vector3f::Constant(0.5f+radius));
-						GPUMemory<Array4f> rgba = get_rgba_on_grid(res3d, effective_view_dir, true, false);
+						// Dump raw density values that the user can then convert to alpha as they please.
+						GPUMemory<Array4f> rgba = get_rgba_on_grid(res3d, effective_view_dir, true, 0.0f, true);
 						save_rgba_grid_to_raw_file(rgba, dir.str().c_str(), res3d, flip_y_and_z_axes, cascade);
 					}
 					m_render_aabb_to_local = old_local;
@@ -1272,9 +1350,7 @@ bool Testbed::keyboard_event() {
 	}
 	if (ImGui::IsKeyPressed('M')) {
 		m_single_view = !m_single_view;
-		if (m_single_view) {
-			set_visualized_dim(-1);
-		}
+		set_visualized_dim(-1);
 		reset_accumulation();
 	}
 	if (ImGui::IsKeyPressed('T')) {
@@ -2044,7 +2120,7 @@ void Testbed::apply_camera_smoothing(float elapsed_ms) {
 }
 
 CameraKeyframe Testbed::copy_camera_to_keyframe() const {
-	return CameraKeyframe(m_camera, m_slice_plane_z, m_scale, fov(), m_aperture_size);
+	return CameraKeyframe(m_camera, m_slice_plane_z, m_scale, fov(), m_aperture_size, m_nerf.glow_mode, m_nerf.glow_y_cutoff);
 }
 
 void Testbed::set_camera_from_keyframe(const CameraKeyframe& k) {
@@ -2053,6 +2129,8 @@ void Testbed::set_camera_from_keyframe(const CameraKeyframe& k) {
 	m_scale = k.scale;
 	set_fov(k.fov);
 	m_aperture_size = k.aperture_size;
+	m_nerf.glow_mode = k.glow_mode;
+	m_nerf.glow_y_cutoff = k.glow_y_cutoff;
 }
 
 void Testbed::set_camera_from_time(float t) {
@@ -2181,6 +2259,7 @@ void Testbed::reset_network(bool clear_density_grid) {
 	m_nerf.training.n_rays_since_error_map_update = 0;
 	m_nerf.training.n_steps_between_error_map_updates = 128;
 	m_nerf.training.error_map.is_cdf_valid = false;
+	m_nerf.training.density_grid_rng = default_rng_t{m_rng.next_uint()};
 
 	m_nerf.training.reset_camera_extrinsics();
 
@@ -2528,12 +2607,13 @@ __global__ void dlss_prep_kernel(
 	cudaSurfaceObject_t depth_surface,
 	cudaSurfaceObject_t mvec_surface,
 	cudaSurfaceObject_t exposure_surface,
-	CameraDistortion camera_distortion,
+	Lens lens,
 	const float view_dist,
 	const float prev_view_dist,
 	const Vector2f image_pos,
 	const Vector2f prev_image_pos,
-	const Vector2i image_resolution
+	const Vector2i image_resolution,
+	const Vector2i quilting_dims
 ) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
@@ -2547,12 +2627,15 @@ __global__ void dlss_prep_kernel(
 	uint32_t x_orig = x;
 	uint32_t y_orig = y;
 
+	if (quilting_dims != Vector2i::Ones()) {
+		apply_quilting(&x, &y, resolution, parallax_shift, quilting_dims);
+	}
 
 	const float depth = depth_buffer[idx];
 	Vector2f mvec = mode == ETestbedMode::Image ? motion_vector_2d(
 		sample_index,
 		{x, y},
-		resolution,
+		resolution.cwiseQuotient(quilting_dims),
 		image_resolution,
 		screen_center,
 		view_dist,
@@ -2563,7 +2646,7 @@ __global__ void dlss_prep_kernel(
 	) : motion_vector_3d(
 		sample_index,
 		{x, y},
-		resolution,
+		resolution.cwiseQuotient(quilting_dims),
 		focal_length,
 		camera,
 		prev_camera,
@@ -2571,7 +2654,7 @@ __global__ void dlss_prep_kernel(
 		parallax_shift,
 		snap_to_pixel_centers,
 		depth,
-		camera_distortion
+		lens
 	);
 
 	surf2Dwrite(make_float2(mvec.x(), mvec.y()), mvec_surface, x_orig * sizeof(float2), y_orig);
@@ -2594,9 +2677,14 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 	Vector2f focal_length = calc_focal_length(render_buffer.in_resolution(), m_fov_axis, m_zoom);
 	Vector2f screen_center = render_screen_center();
 
+	if (m_quilting_dims != Vector2i::Ones() && m_quilting_dims != Vector2i{2, 1}) {
+		// In the case of a holoplay lenticular screen, m_scale represents the inverse distance of the head above the display.
+		m_parallax_shift.z() = 1.0f / m_scale;
+	}
+
 	switch (m_testbed_mode) {
 		case ETestbedMode::Nerf:
-			if (!m_render_ground_truth) {
+			if (!m_render_ground_truth || m_ground_truth_alpha < 1.0f) {
 				render_nerf(render_buffer, max_res, focal_length, camera_matrix0, camera_matrix1, nerf_rolling_shutter, screen_center, m_stream.get());
 			}
 			break;
@@ -2704,15 +2792,10 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 	if (render_buffer.dlss()) {
 		auto res = render_buffer.in_resolution();
 
-		bool distortion = m_testbed_mode == ETestbedMode::Nerf && m_nerf.render_with_camera_distortion;
+		bool distortion = m_testbed_mode == ETestbedMode::Nerf && m_nerf.render_with_lens_distortion;
 
 		const dim3 threads = { 16, 8, 1 };
 		const dim3 blocks = { div_round_up((uint32_t)res.x(), threads.x), div_round_up((uint32_t)res.y(), threads.y), 1 };
-
-		Vector3f parallax_shift = get_scaled_parallax_shift();
-		if (parallax_shift.head<2>() != Vector2f::Zero()) {
-			throw std::runtime_error{"Motion vectors don't support parallax shift."};
-		}
 
 		dlss_prep_kernel<<<blocks, threads, 0, m_stream.get()>>>(
 			m_testbed_mode,
@@ -2720,7 +2803,7 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 			render_buffer.spp(),
 			focal_length,
 			screen_center,
-			parallax_shift,
+			m_parallax_shift,
 			m_snap_to_pixel_centers,
 			render_buffer.depth_buffer(),
 			camera_matrix0,
@@ -2728,12 +2811,13 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 			render_buffer.dlss()->depth(),
 			render_buffer.dlss()->mvec(),
 			render_buffer.dlss()->exposure(),
-			distortion ? m_nerf.render_distortion : CameraDistortion{},
+			distortion ? m_nerf.render_lens : Lens{},
 			m_scale,
 			m_prev_scale,
 			m_image.pos,
 			m_image.prev_pos,
-			m_image.resolution
+			m_image.resolution,
+			m_quilting_dims
 		);
 
 		render_buffer.set_dlss_sharpening(m_dlss_sharpening);
@@ -2749,21 +2833,33 @@ void Testbed::render_frame(const Matrix<float, 3, 4>& camera_matrix0, const Matr
 	if (m_testbed_mode == ETestbedMode::Nerf) {
 		// Overlay the ground truth image if requested
 		if (m_render_ground_truth) {
-			float alpha=1.f;
 			auto const& metadata = m_nerf.training.dataset.metadata[m_nerf.training.view];
-			render_buffer.overlay_image(
-				alpha,
-				Array3f::Constant(m_exposure) + m_nerf.training.cam_exposure[m_nerf.training.view].variable(),
-				m_background_color,
-				to_srgb ? EColorSpace::SRGB : EColorSpace::Linear,
-				metadata.pixels,
-				metadata.image_data_type,
-				metadata.resolution,
-				m_fov_axis,
-				m_zoom,
-				Vector2f::Constant(0.5f),
-				m_stream.get()
-			);
+			if (m_ground_truth_render_mode == EGroundTruthRenderMode::Shade) {
+				render_buffer.overlay_image(
+					m_ground_truth_alpha,
+					Array3f::Constant(m_exposure) + m_nerf.training.cam_exposure[m_nerf.training.view].variable(),
+					m_background_color,
+					to_srgb ? EColorSpace::SRGB : EColorSpace::Linear,
+					metadata.pixels,
+					metadata.image_data_type,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					Vector2f::Constant(0.5f),
+					m_stream.get()
+				);
+			} else if (m_ground_truth_render_mode == EGroundTruthRenderMode::Depth && metadata.depth) {
+				render_buffer.overlay_depth(
+					m_ground_truth_alpha,
+					metadata.depth,
+					1.0f/m_nerf.training.dataset.scale,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					Vector2f::Constant(0.5f),
+					m_stream.get()
+				);
+			}
 		}
 
 		// Visualize the accumulated error map if requested
@@ -2909,6 +3005,8 @@ void Testbed::save_snapshot(const std::string& filepath_string, bool include_opt
 	snapshot["loss"] = m_loss_scalar.val();
 	snapshot["aabb"] = m_aabb;
 	snapshot["bounding_radius"] = m_bounding_radius;
+	to_json(snapshot["render_aabb_to_local"], m_render_aabb_to_local);
+	snapshot["render_aabb"] = m_render_aabb;
 
 	if (m_testbed_mode == ETestbedMode::Nerf) {
 		snapshot["nerf"]["rgb"]["rays_per_batch"] = m_nerf.training.counters_rgb.rays_per_batch;
@@ -2968,12 +3066,17 @@ void Testbed::load_snapshot(const std::string& filepath_string) {
 			density_grid[i] = (float)density_grid_fp16[i];
 		});
 
-		if (m_nerf.density_grid.size() != NERF_GRIDSIZE() * NERF_GRIDSIZE() * NERF_GRIDSIZE() * (m_nerf.max_cascade + 1)) {
+		if (m_nerf.density_grid.size() == NERF_GRIDSIZE() * NERF_GRIDSIZE() * NERF_GRIDSIZE() * (m_nerf.max_cascade + 1)) {
+			update_density_grid_mean_and_bitfield(nullptr);
+		} else if (m_nerf.density_grid.size() != 0) {
+			// A size of 0 indicates that the density grid was never populated, which is a valid state of a (yet) untrained model.
 			throw std::runtime_error{"Incompatible number of grid cascades."};
 		}
-
-		update_density_grid_mean_and_bitfield(nullptr);
 	}
+
+	// Needs to happen after `load_nerf_post()`
+	if (snapshot.contains("render_aabb_to_local")) from_json(snapshot.at("render_aabb_to_local"), m_render_aabb_to_local);
+	m_render_aabb = snapshot.value("render_aabb", m_render_aabb);
 
 	m_network_config_path = filepath_string;
 	m_network_config = config;
@@ -2988,6 +3091,14 @@ void Testbed::load_snapshot(const std::string& filepath_string) {
 
 void Testbed::load_camera_path(const std::string& filepath_string) {
 	m_camera_path.load(filepath_string, Matrix<float, 3, 4>::Identity());
+}
+
+bool Testbed::loop_animation() {
+	return m_camera_path.m_loop;
+}
+
+void Testbed::set_loop_animation(bool value) {
+	m_camera_path.m_loop = value;
 }
 
 NGP_NAMESPACE_END
